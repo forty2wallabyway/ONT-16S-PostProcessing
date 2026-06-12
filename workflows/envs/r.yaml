@@ -1,0 +1,11 @@
+name: bison_pipeline
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - r-base=4.3
+  - r-vegan
+  - r-ggplot2
+  - r-dplyr
+  - r-reshape2
+  - bioconductor-deseq2
