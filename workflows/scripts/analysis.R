@@ -1,16 +1,7 @@
 #############################################
-# BISON NASAL MICROBIOME ANALYSIS (MULTI-RUN)
-# wf-16s outputs + paired design + batch correction
+# BISON NASAL MICROBIOME ANALYSIS
+# Multi-run, paired design, SNS/DNS structure
 #############################################
-
-# Snakemake inputs/outputs
-abund_file <- snakemake@input[["abund"]]
-stats_file <- snakemake@input[["stats"]]
-meta_file  <- snakemake@input[["meta"]]
-
-alpha_out <- snakemake@output[["alpha"]]
-beta_out  <- snakemake@output[["beta"]]
-deseq_out <- snakemake@output[["deseq"]]
 
 # ---------------------------
 # Load libraries
@@ -22,6 +13,17 @@ library(DESeq2)
 library(reshape2)
 
 # ---------------------------
+# Snakemake I/O
+# ---------------------------
+abund_file <- snakemake@input[["abund"]]
+stats_file <- snakemake@input[["stats"]]
+meta_file  <- snakemake@input[["meta"]]
+
+alpha_out <- snakemake@output[["alpha"]]
+beta_out  <- snakemake@output[["beta"]]
+deseq_out <- snakemake@output[["deseq"]]
+
+# ---------------------------
 # 1. Load data
 # ---------------------------
 abund <- read.delim(abund_file, row.names = 1, check.names = FALSE)
@@ -31,44 +33,46 @@ metadata <- read.csv(meta_file, stringsAsFactors = FALSE)
 # ---------------------------
 # 2. Sanity checks
 # ---------------------------
-if (!all(c("sample_id","animal_id","depth","run") %in% colnames(metadata))) {
-  stop("Metadata must contain: sample_id, animal_id, depth, run")
+required_cols <- c("sample_id", "animal_id", "depth", "run")
+
+if (!all(required_cols %in% colnames(metadata))) {
+  stop("Metadata missing required fields")
 }
 
-# Ensure alignment
+# Align metadata and abundance
 metadata <- metadata[metadata$sample_id %in% colnames(abund), ]
 metadata <- metadata[match(colnames(abund), metadata$sample_id), ]
 
 if (!all(metadata$sample_id == colnames(abund))) {
-  stop("Metadata and abundance table are not aligned")
+  stop("Metadata and abundance table do not align properly")
 }
 
 # ---------------------------
-# 3. QC filtering (alignment-stats)
+# 3. QC filtering (alignment stats)
 # ---------------------------
 stats$classified_pct <- stats$classified_reads / stats$total_reads
 
-good_samples <- stats$sample[
+good_samples <- stats$sample_id[
   stats$total_reads > 5000 &
   stats$classified_pct > 0.5
 ]
 
-cat("Retained samples:", length(good_samples), "\n")
+cat("Samples retained after QC:", length(good_samples), "\n")
 
 # Apply filtering
 abund <- abund[, colnames(abund) %in% good_samples]
 metadata <- metadata[metadata$sample_id %in% good_samples, ]
 
-# Re-align after filtering
+# Re-align
 metadata <- metadata[match(colnames(abund), metadata$sample_id), ]
 
 # ---------------------------
-# 4. Remove zero-count taxa
+# 4. Remove zero-abundance taxa
 # ---------------------------
 abund <- abund[rowSums(abund) > 0, ]
 
 # ---------------------------
-# 5. Normalization (relative abundance)
+# 5. Relative abundance normalization
 # ---------------------------
 abund_rel <- sweep(abund, 2, colSums(abund), "/")
 
@@ -102,7 +106,7 @@ ord_df <- data.frame(
   run = metadata$run
 )
 
-# Depth-based plot (main figure)
+# Primary plot (by depth)
 p_beta <- ggplot(ord_df, aes(PC1, PC2, color = depth)) +
   geom_point(size = 3) +
   geom_line(aes(group = animal_id), alpha = 0.4) +
@@ -110,19 +114,19 @@ p_beta <- ggplot(ord_df, aes(PC1, PC2, color = depth)) +
 
 ggsave(beta_out, p_beta, width = 5, height = 4)
 
-# Run effect diagnostic (IMPORTANT)
+# Batch effect diagnostic (IMPORTANT)
 p_batch <- ggplot(ord_df, aes(PC1, PC2, color = run)) +
   geom_point(size = 3) +
   theme_minimal(base_size = 12)
 
 ggsave("results/batch_effect_diagnostic.png", p_batch, width = 5, height = 4)
 
-# PERMANOVA with blocking
+# PERMANOVA (paired + batch-aware)
 beta_test <- adonis2(dist ~ depth + animal_id + run, data = metadata)
 print(beta_test)
 
 # ---------------------------
-# 8. Differential abundance (DESeq2, paired + batch)
+# 8. Differential abundance (DESeq2)
 # ---------------------------
 dds <- DESeqDataSetFromMatrix(
   countData = abund,
@@ -138,10 +142,10 @@ res <- res[order(res$padj), ]
 write.csv(as.data.frame(res), deseq_out)
 
 sig <- res[which(res$padj < 0.05), ]
-cat("Significant taxa:", nrow(sig), "\n")
+cat("Number of significant taxa:", nrow(sig), "\n")
 
 # ---------------------------
-# 9. Top taxa barplot
+# 9. Taxonomic composition (top taxa)
 # ---------------------------
 top_taxa <- names(sort(rowSums(abund_rel), decreasing = TRUE))[1:10]
 
@@ -161,27 +165,27 @@ p_bar <- ggplot(abund_melt, aes(Sample, Abundance, fill = Taxa)) +
 ggsave("results/taxa_barplot.png", p_bar, width = 7, height = 4)
 
 # ---------------------------
-# 10. Key taxa (respiratory focus)
+# 10. Target taxa (respiratory focus)
 # ---------------------------
 target_taxa <- c("Mycoplasma", "Pasteurella", "Mannheimia", "Moraxella")
 
 subset_taxa <- abund_rel[grep(paste(target_taxa, collapse = "|"),
-                              rownames(abund_rel)), ]
+                             rownames(abund_rel)), ]
 
 if (nrow(subset_taxa) > 0) {
-  
+
   subset_df <- melt(as.matrix(subset_taxa))
   colnames(subset_df) <- c("Taxa", "Sample", "Abundance")
-  
+
   subset_df <- merge(subset_df, metadata,
                      by.x = "Sample", by.y = "sample_id")
-  
-  p_pathogen <- ggplot(subset_df, aes(depth, Abundance)) +
+
+  p_path <- ggplot(subset_df, aes(depth, Abundance)) +
     geom_boxplot() +
     facet_wrap(~Taxa, scales = "free") +
     theme_minimal(base_size = 12)
-  
-  ggsave("results/pathogen_focus.png", p_pathogen, width = 6, height = 5)
+
+  ggsave("results/pathogen_focus.png", p_path, width = 6, height = 5)
 }
 
 #############################################
